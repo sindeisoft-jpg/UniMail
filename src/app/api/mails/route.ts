@@ -39,8 +39,29 @@ export async function GET(request: NextRequest) {
 
 type AttachmentPayload = { filename: string; contentType: string; content: string };
 
+/** 从 HTML 中提取纯文本用于 snippet/plain fallback */
+function stripHtmlToText(html: string): string {
+  if (!html || !html.trim()) return "";
+  return html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+}
+
 export async function POST(request: NextRequest) {
-  let body: { to?: string; subject?: string; body?: string; attachments?: AttachmentPayload[] };
+  let body: {
+    to?: string;
+    cc?: string;
+    bcc?: string;
+    subject?: string;
+    body?: string;
+    htmlBody?: string;
+    attachments?: AttachmentPayload[];
+    requestReadReceipt?: boolean;
+  };
   try {
     body = await request.json();
   } catch {
@@ -49,16 +70,28 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     );
   }
-  const { to, subject, body: mailBody, attachments: attachmentsPayload } = body;
-  if (!to || typeof subject !== "string" || typeof mailBody !== "string") {
+  const {
+    to,
+    cc,
+    bcc,
+    subject,
+    body: mailBody,
+    htmlBody,
+    attachments: attachmentsPayload,
+    requestReadReceipt,
+  } = body;
+  if (!to || typeof subject !== "string" || (typeof mailBody !== "string" && typeof htmlBody !== "string")) {
     return NextResponse.json(
       { error: "Missing to, subject or body" },
       { status: 400 }
     );
   }
   const toTrim = String(to).trim();
+  const ccTrim = typeof cc === "string" ? cc.trim() : "";
+  const bccTrim = typeof bcc === "string" ? bcc.trim() : "";
   const subjectTrim = String(subject).trim();
-  const bodyTrim = String(mailBody).trim();
+  const bodyTrim = String(mailBody ?? "").trim();
+  const htmlTrim = typeof htmlBody === "string" ? htmlBody.trim() : "";
   const attachments: AttachmentPayload[] = Array.isArray(attachmentsPayload)
     ? attachmentsPayload.filter(
         (a): a is AttachmentPayload =>
@@ -88,6 +121,21 @@ export async function POST(request: NextRequest) {
     contentType: a.contentType || "application/octet-stream",
   }));
 
+  const textPart = bodyTrim || (htmlTrim ? stripHtmlToText(htmlTrim) : "");
+  const mailOptions: Parameters<ReturnType<typeof nodemailer.createTransport>["sendMail"]>[0] = {
+    from: `"${settings!.displayName || settings!.email}" <${settings!.email}>`,
+    to: toTrim,
+    subject: subjectTrim,
+    text: textPart || undefined,
+    html: htmlTrim || undefined,
+    attachments: nodemailerAttachments.length > 0 ? nodemailerAttachments : undefined,
+  };
+  if (ccTrim) mailOptions.cc = ccTrim;
+  if (bccTrim) mailOptions.bcc = bccTrim;
+  if (requestReadReceipt && settings!.email) {
+    mailOptions.headers = { "Disposition-Notification-To": settings!.email };
+  }
+
   try {
     const transporter = nodemailer.createTransport({
       host: settings!.smtp!.host,
@@ -98,13 +146,7 @@ export async function POST(request: NextRequest) {
         pass: settings!.password,
       },
     });
-    await transporter.sendMail({
-      from: `"${settings!.displayName || settings!.email}" <${settings!.email}>`,
-      to: toTrim,
-      subject: subjectTrim,
-      text: bodyTrim,
-      attachments: nodemailerAttachments.length > 0 ? nodemailerAttachments : undefined,
-    });
+    await transporter.sendMail(mailOptions);
   } catch (e) {
     console.error(e);
     return NextResponse.json(
@@ -117,9 +159,18 @@ export async function POST(request: NextRequest) {
     const mail = await sendMailStore({
       to: toTrim,
       subject: subjectTrim,
-      body: bodyTrim,
+      body: textPart,
+      htmlBody: htmlTrim || undefined,
       from: settings?.displayName || "我",
       fromEmail: settings?.email ?? "me@unimail.app",
+      attachments:
+        attachments.length > 0
+          ? attachments.map((a) => ({
+              filename: a.filename,
+              contentType: a.contentType || "application/octet-stream",
+              content: a.content,
+            }))
+          : undefined,
     });
     return NextResponse.json(mail);
   } catch (e) {

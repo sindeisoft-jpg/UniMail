@@ -104,12 +104,20 @@ export async function mergeMails(incoming: Mail[]): Promise<void> {
   dbMergeMails(incoming);
 }
 
+export type SendMailAttachmentPayload = {
+  filename: string;
+  contentType: string;
+  content: string; // base64
+};
+
 export async function sendMail(params: {
   to: string;
   subject: string;
   body: string;
+  htmlBody?: string | null;
   from?: string;
   fromEmail?: string;
+  attachments?: SendMailAttachmentPayload[];
 }): Promise<Mail> {
   await ensureMigrated();
   return dbSendMail(params);

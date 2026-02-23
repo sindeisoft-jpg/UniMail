@@ -1,4 +1,5 @@
 import { getDbInstance } from "./sqlite";
+import { saveAttachment } from "./attachments";
 import type { Mail } from "@/types/mail";
 
 function rowToMail(row: Record<string, unknown>): Mail {
@@ -137,29 +138,51 @@ export function getAllMailIds(): string[] {
   return rows.map((r) => r.id);
 }
 
+export type SendMailAttachmentPayload = {
+  filename: string;
+  contentType: string;
+  content: string; // base64
+};
+
 export function sendMail(params: {
   to: string;
   subject: string;
   body: string;
+  htmlBody?: string | null;
   from?: string;
   fromEmail?: string;
+  attachments?: SendMailAttachmentPayload[];
 }): Mail {
   const id = String(Date.now());
   const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+  const snippet = params.body.slice(0, 80);
   const mail: Mail = {
     id,
     from: params.from ?? "我",
     fromEmail: params.fromEmail ?? "me@unimail.app",
     to: params.to,
     subject: params.subject,
-    snippet: params.body.slice(0, 80),
+    snippet,
     body: params.body,
+    htmlBody: params.htmlBody ?? undefined,
     date: now,
     read: true,
     starred: false,
     folder: "sent",
   };
   insertMail(mail);
+  if (Array.isArray(params.attachments) && params.attachments.length > 0) {
+    for (let i = 0; i < params.attachments.length; i++) {
+      const a = params.attachments[i];
+      saveAttachment({
+        mailId: id,
+        index: i,
+        filename: a.filename,
+        contentType: a.contentType || "application/octet-stream",
+        content: Buffer.from(a.content, "base64"),
+      });
+    }
+  }
   return mail;
 }
 

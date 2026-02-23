@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getSenderLogoUrl } from "@/lib/sender-logos";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -16,6 +17,7 @@ import {
 import { Reply, Star, Trash2, MoreHorizontal, ShieldAlert, FolderInput, Paperclip, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { sanitizeHtml, rewriteCidToInlineUrl } from "@/lib/sanitize-html";
+import { stripLeadingHeaders } from "@/lib/strip-email-headers";
 import type { Mail, MailAttachment } from "@/types/mail";
 
 function getInitials(name: string): string {
@@ -171,12 +173,12 @@ export function MailDetail({
             <div
               className="prose prose-sm max-w-none dark:prose-invert break-words text-foreground [&_img]:max-w-full [&_a]:text-primary [&_a]:underline"
               dangerouslySetInnerHTML={{
-                __html: sanitizeHtml(rewriteCidToInlineUrl(mail.htmlBody, mail.id)),
+                __html: sanitizeHtml(rewriteCidToInlineUrl(stripLeadingHeaders(mail.htmlBody), mail.id)),
               }}
             />
           ) : (
             <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
-              {mail.body}
+              {stripLeadingHeaders(mail.body)}
             </div>
           )}
         </div>
@@ -205,19 +207,66 @@ function formatSize(bytes: number): string {
 }
 
 function AttachmentRow({ mailId, att }: { mailId: string; att: MailAttachment }) {
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const href = `/api/mails/${encodeURIComponent(mailId)}/attachments/${encodeURIComponent(att.id)}`;
+
+  const handleDownload = async () => {
+    setError(null);
+    setDownloading(true);
+    try {
+      const res = await fetch(href, { method: "GET" });
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = "下载失败";
+        try {
+          const j = JSON.parse(text) as { error?: string };
+          if (j?.error) msg = j.error;
+        } catch {
+          if (text) msg = text.slice(0, 80);
+        }
+        setError(msg);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = att.filename || "attachment";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "网络错误，无法下载附件");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   return (
     <li className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm">
       <span className="min-w-0 truncate text-foreground" title={att.filename}>
         {att.filename}
       </span>
       <span className="shrink-0 text-muted-foreground">{formatSize(att.size)}</span>
-      <Button variant="outline" size="sm" className="shrink-0 gap-1" asChild>
-        <a href={href} download={att.filename} target="_blank" rel="noopener noreferrer">
+      <div className="shrink-0 flex flex-col items-end gap-0.5">
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-1"
+          onClick={handleDownload}
+          disabled={downloading}
+        >
           <Download className="size-4" />
-          下载
-        </a>
-      </Button>
+          {downloading ? "下载中…" : "下载"}
+        </Button>
+        {error && (
+          <span className="text-xs text-destructive" title={error}>
+            {error.length > 20 ? `${error.slice(0, 20)}…` : error}
+          </span>
+        )}
+      </div>
     </li>
   );
 }

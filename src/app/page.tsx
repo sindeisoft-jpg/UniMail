@@ -21,7 +21,10 @@ function HomeContent() {
   const searchParams = useSearchParams();
   const [activeFolder, setActiveFolder] = useState<string>("inbox");
   const [mails, setMails] = useState<Mail[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** 当前选中的邮件 id 列表，支持多选 */
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  /** 用于详情面板展示的邮件 id（多选时以最后点击/焦点为准） */
+  const [focusedId, setFocusedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [agentPanelOpen, setAgentPanelOpen] = useState(false);
   const [folderCounts, setFolderCounts] = useState<Record<string, number>>({});
@@ -31,12 +34,16 @@ function HomeContent() {
   const [userDisplayName, setUserDisplayName] = useState<string>("");
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeInitialTo, setComposeInitialTo] = useState("");
+  const [composeInitialCc, setComposeInitialCc] = useState("");
   const [composeInitialSubject, setComposeInitialSubject] = useState("");
+  const [composeInitialBody, setComposeInitialBody] = useState("");
   const isDraggingRef = useRef(false);
   const startXRef = useRef(0);
   const startWidthRef = useRef(LIST_PANEL_DEFAULT);
 
-  const selectedMail = mails.find((m) => m.id === selectedId) ?? null;
+  /** 详情面板展示的完整邮件（含附件），由 GET /api/mails/[id] 拉取 */
+  const [detailMail, setDetailMail] = useState<Mail | null>(null);
+  const selectedMails = mails.filter((m) => selectedIds.has(m.id));
 
   const loadMails = useCallback(async (folder: string) => {
     setLoading(true);
@@ -94,9 +101,34 @@ function HomeContent() {
       .catch(() => {});
   }, []);
 
+  /** 打开详情时拉取完整邮件（含附件），列表接口不返回附件 */
+  useEffect(() => {
+    if (!focusedId) {
+      setDetailMail(null);
+      return;
+    }
+    let cancelled = false;
+    mailApi.getMail(focusedId).then((full) => {
+      if (!cancelled && full) setDetailMail(full);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [focusedId]);
+
   const handleSelectMail = useCallback(
-    async (mail: Mail) => {
-      setSelectedId(mail.id);
+    async (mail: Mail, addToSelection?: boolean) => {
+      if (addToSelection) {
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(mail.id)) next.delete(mail.id);
+          else next.add(mail.id);
+          return next;
+        });
+      } else {
+        setSelectedIds(new Set([mail.id]));
+      }
+      setFocusedId(mail.id);
       if (!mail.read) {
         await mailApi.markAsRead(mail.id);
         setMails((prev) =>
@@ -107,6 +139,11 @@ function HomeContent() {
     []
   );
 
+  const handleSelectAll = useCallback(() => {
+    setSelectedIds(new Set(mails.map((m) => m.id)));
+    if (mails.length > 0 && !focusedId) setFocusedId(mails[0].id);
+  }, [mails, focusedId]);
+
   const handleStar = useCallback(async (mail: Mail) => {
     const updated = await mailApi.setStarred(mail.id, !mail.starred);
     if (updated) {
@@ -115,6 +152,9 @@ function HomeContent() {
           m.id === mail.id ? { ...m, starred: updated.starred } : m
         )
       );
+      setDetailMail((prev) =>
+        prev?.id === mail.id ? { ...prev, starred: updated.starred } : prev
+      );
     }
   }, []);
 
@@ -122,35 +162,178 @@ function HomeContent() {
     const updated = await mailApi.moveToTrash(mail.id);
     if (updated) {
       setMails((prev) => prev.filter((m) => m.id !== mail.id));
-      if (selectedId === mail.id) setSelectedId(null);
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(mail.id);
+        return next;
+      });
+      if (focusedId === mail.id) setFocusedId(null);
       loadCounts();
     }
-  }, [selectedId, loadCounts]);
+  }, [focusedId, loadCounts]);
 
   const handleMoveToSpam = useCallback(async (mail: Mail) => {
     const updated = await mailApi.moveToSpam(mail.id);
     if (updated) {
       setMails((prev) => prev.filter((m) => m.id !== mail.id));
-      if (selectedId === mail.id) setSelectedId(null);
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(mail.id);
+        return next;
+      });
+      if (focusedId === mail.id) setFocusedId(null);
       loadCounts();
     }
-  }, [selectedId, loadCounts]);
+  }, [focusedId, loadCounts]);
 
   const handleMoveToFolder = useCallback(async (mail: Mail, folderId: string) => {
     const updated = await mailApi.moveToFolder(mail.id, folderId);
     if (updated) {
       setMails((prev) => prev.filter((m) => m.id !== mail.id));
-      if (selectedId === mail.id) setSelectedId(null);
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(mail.id);
+        return next;
+      });
+      if (focusedId === mail.id) setFocusedId(null);
       loadCounts();
     }
-  }, [selectedId, loadCounts]);
+  }, [focusedId, loadCounts]);
 
   const handleReply = useCallback((mail: Mail) => {
     const to = mail.fromEmail || mail.from;
     const subj = mail.subject.startsWith("Re:") ? mail.subject : `Re: ${mail.subject}`;
     setComposeInitialTo(to);
+    setComposeInitialCc("");
     setComposeInitialSubject(subj);
+    setComposeInitialBody("");
     setComposeOpen(true);
+  }, []);
+
+  const handleReplyAll = useCallback((mail: Mail) => {
+    const to = mail.fromEmail || mail.from;
+    const cc = mail.to || "";
+    const subj = mail.subject.startsWith("Re:") ? mail.subject : `Re: ${mail.subject}`;
+    setComposeInitialTo(to);
+    setComposeInitialCc(cc);
+    setComposeInitialSubject(subj);
+    setComposeInitialBody("");
+    setComposeOpen(true);
+  }, []);
+
+  const handleForward = useCallback(async (mail: Mail) => {
+    const subj = mail.subject.startsWith("Fwd:") ? mail.subject : `Fwd: ${mail.subject}`;
+    setComposeInitialTo("");
+    setComposeInitialCc("");
+    setComposeInitialSubject(subj);
+    let body = "";
+    try {
+      const full = await mailApi.getMail(mail.id);
+      if (full?.body) {
+        body = `\n\n---------- 转发邮件 ----------\n发件人: ${full.from} <${full.fromEmail}>\n日期: ${full.date}\n主题: ${full.subject}\n收件人: ${full.to}\n\n${full.body}`;
+      } else {
+        body = `\n\n---------- 转发邮件 ----------\n发件人: ${mail.from}\n日期: ${mail.date}\n主题: ${mail.subject}\n\n${mail.snippet}`;
+      }
+    } catch {
+      body = `\n\n---------- 转发邮件 ----------\n发件人: ${mail.from}\n日期: ${mail.date}\n主题: ${mail.subject}\n\n${mail.snippet}`;
+    }
+    setComposeInitialBody(body);
+    setComposeOpen(true);
+  }, []);
+
+  const handleForwardAsAttachment = useCallback((mail: Mail) => {
+    mailApi.exportMailAsEml(mail.id);
+    setComposeInitialTo("");
+    setComposeInitialCc("");
+    setComposeInitialSubject(mail.subject.startsWith("Fwd:") ? mail.subject : `Fwd: ${mail.subject}`);
+    setComposeInitialBody("");
+    setComposeOpen(true);
+  }, []);
+
+  const handleMarkUnread = useCallback(async (mail: Mail) => {
+    const updated = await mailApi.markAsUnread(mail.id);
+    if (updated) {
+      setMails((prev) =>
+        prev.map((m) => (m.id === mail.id ? { ...m, read: false } : m))
+      );
+    }
+  }, []);
+
+  const handleMarkAllRead = useCallback(async () => {
+    for (const mail of mails) {
+      if (!mail.read) await mailApi.markAsRead(mail.id);
+    }
+    setMails((prev) => prev.map((m) => ({ ...m, read: true })));
+    loadCounts();
+  }, [mails, loadCounts]);
+
+  /** 将当前选中的邮件批量标记为已读 */
+  const handleMarkSelectedRead = useCallback(async () => {
+    for (const id of selectedIds) {
+      await mailApi.markAsRead(id);
+    }
+    setMails((prev) =>
+      prev.map((m) => (selectedIds.has(m.id) ? { ...m, read: true } : m))
+    );
+    loadCounts();
+  }, [selectedIds, loadCounts]);
+
+  /** 批量操作：对选中的多封邮件执行同一操作 */
+  const handleBatchMarkUnread = useCallback(async () => {
+    for (const id of selectedIds) {
+      await mailApi.markAsUnread(id);
+    }
+    setMails((prev) =>
+      prev.map((m) => (selectedIds.has(m.id) ? { ...m, read: false } : m))
+    );
+  }, [selectedIds]);
+
+  const handleBatchStar = useCallback(async () => {
+    const selected = mails.filter((m) => selectedIds.has(m.id));
+    const toStar = selected.some((m) => !m.starred);
+    for (const mail of selected) {
+      if (mail.starred !== toStar) {
+        const updated = await mailApi.setStarred(mail.id, toStar);
+        if (updated) setMails((prev) => prev.map((m) => (m.id === mail.id ? { ...m, starred: updated.starred } : m)));
+      }
+    }
+  }, [mails, selectedIds]);
+
+  const handleBatchMoveToFolder = useCallback(
+    async (folderId: string) => {
+      for (const id of selectedIds) {
+        const updated = await mailApi.moveToFolder(id, folderId);
+        if (updated) setMails((prev) => prev.filter((m) => m.id !== id));
+      }
+      setSelectedIds(new Set());
+      setFocusedId(null);
+      loadCounts();
+    },
+    [selectedIds, loadCounts]
+  );
+
+  const handleBatchDelete = useCallback(async () => {
+    for (const id of selectedIds) {
+      await mailApi.moveToTrash(id);
+    }
+    setMails((prev) => prev.filter((m) => !selectedIds.has(m.id)));
+    setSelectedIds(new Set());
+    setFocusedId(null);
+    loadCounts();
+  }, [selectedIds, loadCounts]);
+
+  const handleBatchExport = useCallback(async () => {
+    for (const id of selectedIds) {
+      await mailApi.exportMailAsEml(id);
+    }
+  }, [selectedIds]);
+
+  const handleCreateRule = useCallback((_mail: Mail) => {
+    alert("创建规则功能即将上线");
+  }, []);
+
+  const handleExport = useCallback((mail: Mail) => {
+    mailApi.exportMailAsEml(mail.id);
   }, []);
 
   const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
@@ -211,7 +394,9 @@ function HomeContent() {
             className="gap-2"
             onClick={() => {
               setComposeInitialTo("");
+              setComposeInitialCc("");
               setComposeInitialSubject("");
+              setComposeInitialBody("");
               setComposeOpen(true);
             }}
           >
@@ -227,7 +412,8 @@ function HomeContent() {
           displayName={userDisplayName}
           onFolderChange={(folder) => {
             setActiveFolder(folder);
-            setSelectedId(null);
+            setSelectedIds(new Set());
+            setFocusedId(null);
           }}
           onAgentOpen={() => setAgentPanelOpen(true)}
           onFoldersChange={loadFolders}
@@ -246,8 +432,30 @@ function HomeContent() {
           ) : (
             <MailList
               mails={mails}
-              selectedId={selectedId}
+              selectedIds={selectedIds}
+              focusedId={focusedId}
               onSelect={handleSelectMail}
+              onSelectAll={handleSelectAll}
+              contextMenu={{
+                onReply: handleReply,
+                onReplyAll: handleReplyAll,
+                onForward: handleForward,
+                onForwardAsAttachment: handleForwardAsAttachment,
+                onMarkUnread: handleMarkUnread,
+                onStar: handleStar,
+                onMoveToFolder: handleMoveToFolder,
+                onCreateRule: handleCreateRule,
+                onExport: handleExport,
+                onDelete: handleDelete,
+                onMarkAllRead: handleMarkAllRead,
+                onMarkSelectedRead: handleMarkSelectedRead,
+                onBatchMarkUnread: handleBatchMarkUnread,
+                onBatchStar: handleBatchStar,
+                onBatchMoveToFolder: handleBatchMoveToFolder,
+                onBatchDelete: handleBatchDelete,
+                onBatchExport: handleBatchExport,
+              }}
+              foldersForMove={customFoldersForMove}
             />
           )}
         </section>
@@ -262,7 +470,7 @@ function HomeContent() {
         </div>
         <section className="flex min-w-0 flex-1 flex-col">
           <MailDetail
-            mail={selectedMail}
+            mail={detailMail}
             allFolders={customFoldersForMove}
             systemFolderLabels={{ inbox: "收件箱", sent: "已发送", drafts: "草稿箱", trash: "已删除", spam: "垃圾箱" }}
             onReply={handleReply}
@@ -276,7 +484,9 @@ function HomeContent() {
           open={composeOpen}
           onOpenChange={setComposeOpen}
           initialTo={composeInitialTo}
+          initialCc={composeInitialCc}
           initialSubject={composeInitialSubject}
+          initialBody={composeInitialBody}
           onSent={loadCounts}
         />
         {agentPanelOpen && (

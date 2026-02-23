@@ -1,9 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSettingsSafe, saveSettings } from "@/lib/store/settings";
+import { getSettings, getSettingsSafe, saveSettings } from "@/lib/store/settings";
 import type { EmailAccountSettings } from "@/types/settings";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const { searchParams } = new URL(request.url);
+    const includePassword = searchParams.get("includePassword") === "true" || searchParams.get("includePassword") === "1";
+    if (includePassword) {
+      const full = await getSettings();
+      if (!full?.email) return NextResponse.json({ configured: false });
+      return NextResponse.json({
+        configured: true,
+        displayName: full.displayName,
+        email: full.email,
+        password: full.password,
+        imap: full.imap,
+        smtp: full.smtp,
+        hasPassword: !!full.password,
+      });
+    }
     const settings = await getSettingsSafe();
     return NextResponse.json(settings ?? { configured: false });
   } catch (e) {

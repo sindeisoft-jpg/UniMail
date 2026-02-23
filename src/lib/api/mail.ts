@@ -53,6 +53,14 @@ export async function markAsRead(id: string): Promise<Mail | null> {
   return data ?? null;
 }
 
+export async function markAsUnread(id: string): Promise<Mail | null> {
+  const { data } = await request<Mail>(`${BASE}/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ read: false }),
+  });
+  return data ?? null;
+}
+
 export async function setStarred(id: string, starred: boolean): Promise<Mail | null> {
   const { data } = await request<Mail>(`${BASE}/${id}`, {
     method: "PATCH",
@@ -85,25 +93,56 @@ export async function moveToFolder(mailId: string, folderId: string): Promise<Ma
   return data ?? null;
 }
 
+/** 导出单封邮件为 .eml 并触发浏览器下载（会先请求完整邮件） */
+export async function exportMailAsEml(mailId: string): Promise<void> {
+  const mail = await getMail(mailId);
+  if (!mail) return;
+  const lines: string[] = [
+    `From: ${mail.from} <${mail.fromEmail}>`,
+    `To: ${mail.to}`,
+    `Subject: ${mail.subject}`,
+    `Date: ${new Date(mail.date).toUTCString()}`,
+    "MIME-Version: 1.0",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    mail.body || "",
+  ];
+  const blob = new Blob([lines.join("\r\n")], { type: "message/rfc822" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${mail.subject.replace(/[/\\?%*:|"]/g, "_").slice(0, 50)}.eml`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export type SendMailAttachment = { filename: string; contentType?: string; content: string };
 
 export async function sendMail(params: {
   to: string;
   subject: string;
   body: string;
+  cc?: string;
+  bcc?: string;
+  htmlBody?: string;
   attachments?: SendMailAttachment[];
+  requestReadReceipt?: boolean;
 }): Promise<Mail | null> {
   const { data, error } = await request<Mail>(BASE, {
     method: "POST",
     body: JSON.stringify({
       to: params.to,
+      cc: params.cc?.trim() || undefined,
+      bcc: params.bcc?.trim() || undefined,
       subject: params.subject,
       body: params.body,
+      htmlBody: params.htmlBody?.trim() || undefined,
       attachments: params.attachments?.map((a) => ({
         filename: a.filename,
         contentType: a.contentType || "application/octet-stream",
         content: a.content,
       })),
+      requestReadReceipt: params.requestReadReceipt,
     }),
   });
   if (error) {

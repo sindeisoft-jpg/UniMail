@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import path from "path";
-import { mkdirSync, existsSync } from "fs";
+import { mkdirSync, existsSync, readFileSync } from "fs";
 
 const DATA_DIR = path.join(process.cwd(), ".data");
 const DB_PATH = path.join(DATA_DIR, "unimail.db");
@@ -15,6 +15,20 @@ function getDb(): Database.Database {
 
 function runMigrations(db: Database.Database) {
   db.exec(`
+    CREATE TABLE IF NOT EXISTS email_settings (
+      id INTEGER PRIMARY KEY CHECK(id = 1),
+      display_name TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT '',
+      password TEXT NOT NULL DEFAULT '',
+      imap_host TEXT NOT NULL DEFAULT '',
+      imap_port INTEGER NOT NULL DEFAULT 993,
+      imap_secure INTEGER NOT NULL DEFAULT 1,
+      smtp_host TEXT NOT NULL DEFAULT '',
+      smtp_port INTEGER NOT NULL DEFAULT 465,
+      smtp_secure INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS folders (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -74,6 +88,43 @@ function runMigrations(db: Database.Database) {
       ('trash', '已删除', 'system', 3),
       ('spam', '垃圾箱', 'system', 4)
     `).run();
+  }
+
+  // 若 SQLite 中尚无邮箱配置，尝试从旧版 .data/settings.json 迁移
+  const settingsRow = db.prepare("SELECT 1 FROM email_settings WHERE id = 1").get();
+  if (!settingsRow) {
+    const settingsPath = path.join(DATA_DIR, "settings.json");
+    if (existsSync(settingsPath)) {
+      try {
+        const raw = readFileSync(settingsPath, "utf-8");
+        const data = JSON.parse(raw) as {
+          displayName?: string;
+          email?: string;
+          password?: string;
+          imap?: { host?: string; port?: number; secure?: boolean };
+          smtp?: { host?: string; port?: number; secure?: boolean };
+        };
+        if (data?.email) {
+          db.prepare(`
+            INSERT INTO email_settings (id, display_name, email, password, imap_host, imap_port, imap_secure, smtp_host, smtp_port, smtp_secure, updated_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            data.displayName ?? "",
+            data.email.trim(),
+            data.password ?? "",
+            data.imap?.host ?? "",
+            data.imap?.port ?? 993,
+            data.imap?.secure !== false ? 1 : 0,
+            data.smtp?.host ?? "",
+            data.smtp?.port ?? 465,
+            data.smtp?.secure !== false ? 1 : 0,
+            new Date().toISOString()
+          );
+        }
+      } catch {
+        // 忽略迁移失败
+      }
+    }
   }
 }
 

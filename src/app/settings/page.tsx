@@ -65,13 +65,13 @@ export default function SettingsPage() {
   const loadSettings = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/settings");
+      const res = await fetch("/api/settings?includePassword=true");
       const data = await res.json();
       if (data.configured && data.email) {
         const nextForm = {
           displayName: data.displayName ?? "",
           email: data.email ?? "",
-          password: "",
+          password: data.password ?? "",
           imapHost: data.imap?.host ?? "",
           imapPort: String(data.imap?.port ?? 993),
           imapSecure: data.imap?.secure ?? true,

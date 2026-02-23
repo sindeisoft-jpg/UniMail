@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Paperclip,
-  Image,
+  Image as ImageIcon,
   Scissors,
+  ClipboardPaste,
   Bold,
   Italic,
   Underline,
@@ -22,6 +23,10 @@ import {
   MoreHorizontal,
   Send,
   Loader2,
+  Undo2,
+  Strikethrough,
+  RemoveFormatting,
+  X,
 } from "lucide-react";
 import {
   Dialog,
@@ -31,18 +36,64 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { sendMail } from "@/lib/api/mail";
 import { cn } from "@/lib/utils";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+
+const FONT_OPTIONS = [
+  { value: "", label: "字体" },
+  { value: "Arial", label: "Arial" },
+  { value: "Microsoft YaHei", label: "微软雅黑" },
+  { value: "SimSun", label: "宋体" },
+  { value: "SimHei", label: "黑体" },
+  { value: "KaiTi", label: "楷体" },
+  { value: "Times New Roman", label: "Times New Roman" },
+];
+
+const FONT_SIZES = [
+  { value: "1", label: "10" },
+  { value: "2", label: "12" },
+  { value: "3", label: "14" },
+  { value: "4", label: "16" },
+  { value: "5", label: "18" },
+  { value: "6", label: "24" },
+  { value: "7", label: "36" },
+];
+
+const EMOJI_LIST = [
+  "😀", "😃", "😄", "😁", "😅", "😂", "🤣", "😊", "😇", "🙂",
+  "😉", "😍", "🥰", "😘", "👍", "👎", "👏", "🙌", "🤝", "💪",
+  "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "💯", "✅", "❌",
+  "⭐", "🌟", "🔥", "💡", "📧", "📎", "📌", "🔔", "⏰", "📅",
+];
+
+type AttachmentItem = { file: File; id: string };
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      const base64 = result.includes(",") ? result.split(",")[1] : result;
+      resolve(base64 ?? "");
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
 
 export interface ComposeModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** 初始收件人（如从回复进入） */
   initialTo?: string;
-  /** 初始主题（如从回复进入） */
+  initialCc?: string;
   initialSubject?: string;
-  /** 发送成功后回调（如刷新列表） */
+  initialBody?: string;
   onSent?: () => void;
 }
 
@@ -50,7 +101,9 @@ export function ComposeModal({
   open,
   onOpenChange,
   initialTo = "",
+  initialCc = "",
   initialSubject = "",
+  initialBody = "",
   onSent,
 }: ComposeModalProps) {
   const [to, setTo] = useState("");
@@ -62,16 +115,43 @@ export function ComposeModal({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [senderEmail, setSenderEmail] = useState<string>("");
-  const [showCc, setShowCc] = useState(false);
+  const [showCc, setShowCc] = useState(!!initialCc);
   const [showBcc, setShowBcc] = useState(false);
+  const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
+  const [fontFamily, setFontFamily] = useState("");
+  const [fontSize, setFontSize] = useState("3");
+
+  const editorRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+
+  const isHtml = (s: string) => /^[\s\S]*<[a-z][\s\S]*>/i.test(s);
 
   useEffect(() => {
     if (open) {
       setTo(initialTo);
+      setCc(initialCc);
       setSubject(initialSubject);
+      setBody(initialBody);
+      setShowCc(!!initialCc);
       setError(null);
+      setAttachments([]);
     }
-  }, [open, initialTo, initialSubject]);
+  }, [open, initialTo, initialCc, initialSubject, initialBody]);
+
+  useEffect(() => {
+    if (!open || !editorRef.current) return;
+    const el = editorRef.current;
+    if (initialBody) {
+      if (isHtml(initialBody)) {
+        el.innerHTML = initialBody;
+      } else {
+        el.textContent = initialBody;
+      }
+    } else {
+      el.innerHTML = "";
+    }
+  }, [open]);
 
   useEffect(() => {
     if (open) {
@@ -84,6 +164,82 @@ export function ComposeModal({
     }
   }, [open]);
 
+  const focusEditor = useCallback(() => {
+    editorRef.current?.focus();
+  }, []);
+
+  const execCmd = useCallback((command: string, value?: string) => {
+    focusEditor();
+    document.execCommand(command, false, value ?? undefined);
+  }, [focusEditor]);
+
+  const handleEditorInput = useCallback(() => {
+    const el = editorRef.current;
+    if (el) setBody(el.innerText ?? "");
+  }, []);
+
+  const handleAddAttachment = () => {
+    fileInputRef.current?.click();
+  };
+
+  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    const newItems: AttachmentItem[] = Array.from(files).map((file) => ({
+      file,
+      id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    }));
+    setAttachments((prev) => [...prev, ...newItems].slice(0, 20));
+    e.target.value = "";
+  };
+
+  const removeAttachment = (id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  };
+
+  const handleInsertImage = () => {
+    imageInputRef.current?.click();
+  };
+
+  const onImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      focusEditor();
+      document.execCommand("insertImage", false, dataUrl);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
+
+  const handleInsertLink = () => {
+    const url = window.prompt("请输入链接地址：", "https://");
+    if (url != null && url.trim()) execCmd("createLink", url.trim());
+  };
+
+  const handleInsertTable = () => {
+    const rows = window.prompt("行数（默认 3）：", "3");
+    const cols = window.prompt("列数（默认 3）：", "3");
+    const r = Math.min(10, Math.max(1, parseInt(rows || "3", 10) || 3));
+    const c = Math.min(10, Math.max(1, parseInt(cols || "3", 10) || 3));
+    let html = "<table border=\"1\" cellpadding=\"4\" cellspacing=\"0\" style=\"border-collapse: collapse;\"><tbody>";
+    for (let i = 0; i < r; i++) {
+      html += "<tr>";
+      for (let j = 0; j < c; j++) html += "<td>&nbsp;</td>";
+      html += "</tr>";
+    }
+    html += "</tbody></table>";
+    focusEditor();
+    document.execCommand("insertHTML", false, html);
+  };
+
+  const insertEmoji = (emoji: string) => {
+    focusEditor();
+    document.execCommand("insertText", false, emoji);
+  };
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     const toTrim = to.trim();
@@ -94,10 +250,25 @@ export function ComposeModal({
     setError(null);
     setSending(true);
     try {
+      const el = editorRef.current;
+      const plainBody = el?.innerText?.trim() ?? body.trim();
+      const htmlBody = el?.innerHTML?.trim() ?? "";
+      const attachmentPayloads = await Promise.all(
+        attachments.map(async (a) => ({
+          filename: a.file.name,
+          contentType: a.file.type || "application/octet-stream",
+          content: await fileToBase64(a.file),
+        }))
+      );
       const mail = await sendMail({
         to: toTrim,
+        cc: cc.trim() || undefined,
+        bcc: bcc.trim() || undefined,
         subject: subject.trim(),
-        body: body.trim(),
+        body: plainBody,
+        htmlBody: htmlBody || undefined,
+        attachments: attachmentPayloads.length > 0 ? attachmentPayloads : undefined,
+        requestReadReceipt: readReceipt,
       });
       if (mail) {
         onOpenChange(false);
@@ -106,6 +277,8 @@ export function ComposeModal({
         setBcc("");
         setSubject("");
         setBody("");
+        if (editorRef.current) editorRef.current.innerHTML = "";
+        setAttachments([]);
         onSent?.();
       } else {
         setError("发送失败，请重试");
@@ -125,6 +298,20 @@ export function ComposeModal({
         aria-describedby={undefined}
       >
         <DialogTitle className="sr-only">写邮件</DialogTitle>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={onFileChange}
+        />
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={onImageChange}
+        />
         <form
           onSubmit={handleSend}
           className="flex flex-1 flex-col min-h-0 overflow-hidden"
@@ -207,88 +394,161 @@ export function ComposeModal({
 
           {/* 格式化工具栏 */}
           <div className="shrink-0 flex flex-wrap items-center gap-1 border-b border-border px-3 py-2 bg-muted/30">
-            <Button type="button" variant="ghost" size="sm" className="h-8 gap-1.5 text-xs">
+            <Button type="button" variant="ghost" size="sm" className="h-8 gap-1.5 text-xs" onClick={handleAddAttachment}>
               <Paperclip className="size-3.5" />
               添加附件
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 px-2">
-              <Image className="size-3.5" />
+            <Button type="button" variant="ghost" size="sm" className="h-8 px-2" onClick={handleInsertImage}>
+              <ImageIcon className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 px-2">
+            <Button type="button" variant="ghost" size="sm" className="h-8 px-2" onClick={() => execCmd("cut")}>
               <Scissors className="size-3.5" />
+            </Button>
+            <Button type="button" variant="ghost" size="sm" className="h-8 px-2" onClick={() => execCmd("paste")}>
+              <ClipboardPaste className="size-3.5" />
             </Button>
             <span className="w-px h-5 bg-border mx-1" />
             <select
               className="h-8 rounded border border-border bg-background px-2 text-xs text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-              defaultValue=""
+              value={fontFamily}
               aria-label="字体"
+              onChange={(e) => {
+                const v = e.target.value;
+                setFontFamily(v);
+                if (v) execCmd("fontName", v);
+              }}
             >
-              <option value="">字体</option>
+              {FONT_OPTIONS.map((o) => (
+                <option key={o.value || "default"} value={o.value}>{o.label}</option>
+              ))}
             </select>
             <select
               className="h-8 rounded border border-border bg-background px-2 text-xs text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
               aria-label="字号"
+              value={fontSize}
+              onChange={(e) => {
+                const v = e.target.value;
+                setFontSize(v);
+                execCmd("fontSize", v);
+              }}
             >
-              <option value="14">14</option>
+              {FONT_SIZES.map((s) => (
+                <option key={s.value} value={s.value}>{s.label}</option>
+              ))}
             </select>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
-              <span className="size-3.5 rounded border-2 border-current" style={{ borderBottomColor: "transparent" }} />
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("undo")} title="撤销">
+              <Undo2 className="size-3.5" />
             </Button>
             <span className="w-px h-5 bg-border mx-1" />
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("bold")} title="加粗">
               <Bold className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("italic")} title="斜体">
               <Italic className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("underline")} title="下划线">
               <Underline className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("justifyLeft")} title="左对齐">
               <AlignLeft className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("justifyCenter")} title="居中">
               <AlignCenter className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("justifyRight")} title="右对齐">
               <AlignRight className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("justifyFull")} title="两端对齐">
               <AlignJustify className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("insertUnorderedList")} title="无序列表">
               <List className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("insertOrderedList")} title="有序列表">
               <ListOrdered className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
-              <IndentIncrease className="size-3.5" />
-            </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("outdent")} title="减少缩进">
               <IndentDecrease className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => execCmd("indent")} title="增加缩进">
+              <IndentIncrease className="size-3.5" />
+            </Button>
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={handleInsertLink} title="插入链接">
               <Link className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
+            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={handleInsertTable} title="插入表格">
               <Table className="size-3.5" />
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0">
-              <Smile className="size-3.5" />
-            </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0 ml-auto">
-              <MoreHorizontal className="size-3.5" />
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0" title="表情">
+                  <Smile className="size-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64 p-2">
+                <div className="grid grid-cols-10 gap-1">
+                  {EMOJI_LIST.map((emoji, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      className="text-lg hover:bg-muted rounded p-1"
+                      onClick={() => insertEmoji(emoji)}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="ghost" size="sm" className="h-8 w-8 p-0 ml-auto" title="更多">
+                  <MoreHorizontal className="size-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => execCmd("strikeThrough")}>
+                  <Strikethrough className="size-4 mr-2" />
+                  删除线
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => execCmd("removeFormat")}>
+                  <RemoveFormatting className="size-4 mr-2" />
+                  清除格式
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
 
-          {/* 正文区域 */}
-          <div className="flex-1 min-h-[200px] overflow-hidden px-4 py-3">
-            <Textarea
-              placeholder="输入邮件正文…"
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              className="h-full min-h-[180px] w-full resize-none rounded border-0 bg-transparent px-0 py-2 text-[15px] leading-relaxed placeholder:text-muted-foreground focus-visible:ring-0"
+          {/* 附件列表 */}
+          {attachments.length > 0 && (
+            <div className="shrink-0 flex flex-wrap items-center gap-2 px-4 py-2 border-b border-border bg-muted/20">
+              {attachments.map((a) => (
+                <span
+                  key={a.id}
+                  className="flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-xs"
+                >
+                  <span className="max-w-[140px] truncate" title={a.file.name}>{a.file.name}</span>
+                  <button
+                    type="button"
+                    aria-label="移除附件"
+                    className="p-0.5 rounded hover:bg-muted"
+                    onClick={() => removeAttachment(a.id)}
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* 正文区域 - 富文本 */}
+          <div className="flex-1 min-h-[200px] overflow-auto px-4 py-3">
+            <div
+              ref={editorRef}
+              contentEditable
+              data-placeholder="输入邮件正文…"
+              onInput={handleEditorInput}
+              className="min-h-[180px] w-full rounded border-0 bg-transparent px-0 py-2 text-[15px] leading-relaxed outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-muted-foreground focus:ring-0 prose prose-sm max-w-none dark:prose-invert [&_table]:border [&_td]:border [&_th]:border [&_img]:max-w-full"
             />
           </div>
 

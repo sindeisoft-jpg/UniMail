@@ -4,6 +4,7 @@ import { simpleParser } from "mailparser";
 import { getSettings } from "@/lib/store/settings";
 import { getExistingMailIds, mergeMails } from "@/lib/store/mails";
 import { saveAttachment } from "@/lib/db/attachments";
+import { stripLeadingHeaders } from "@/lib/strip-email-headers";
 import { ImapFlow } from "imapflow";
 import type { Mail } from "@/types/mail";
 
@@ -32,6 +33,14 @@ function formatDate(d: Date): string {
   return d.toISOString().slice(0, 16).replace("T", " ");
 }
 
+/** 常见 IMAP 垃圾邮件箱名称（不区分大小写匹配） */
+const SPAM_MAILBOX_NAMES = ["spam", "junk", "junk email", "junk e-mail", "[gmail]/spam", "垃圾邮件", "垃圾"];
+
+function isSpamMailbox(path: string): boolean {
+  const lower = path.toLowerCase().replace(/\s+/g, " ");
+  return SPAM_MAILBOX_NAMES.some((name) => lower.includes(name));
+}
+
 export async function POST() {
   const settings = await getSettings();
   if (!settings?.password || !settings.imap.host) {
@@ -57,88 +66,92 @@ export async function POST() {
 
   try {
     await client.connect();
-    const lock = await client.getMailboxLock("INBOX");
-    try {
-      const existingIds = await getExistingMailIds();
+    const existingIds = await getExistingMailIds();
 
-      const uids = await client.search({ all: true }, { uid: true });
-      const toFetch = Array.isArray(uids) ? uids.slice(-100) : [];
-      if (toFetch.length === 0) {
-        return NextResponse.json({ synced: 0, message: "收件箱为空" });
-      }
+    const syncMailbox = async (mailboxPath: string, folder: "inbox" | "spam") => {
+      const idPrefix = folder === "spam" ? `imap-${settings.email}-spam-` : `imap-${settings.email}-`;
+      const lock = await client.getMailboxLock(mailboxPath);
+      try {
+        const uids = await client.search({ all: true }, { uid: true });
+        const toFetch = Array.isArray(uids) ? uids.slice(-100) : [];
+        for (const msg of await client.fetchAll(toFetch, { envelope: true, source: true }, { uid: true })) {
+          const uid = msg.uid;
+          const id = `${idPrefix}${uid}`;
+          if (existingIds.has(id)) continue;
 
-      const messages = await client.fetchAll(
-        toFetch,
-        { envelope: true, source: true },
-        { uid: true }
-      );
-
-      for (const msg of messages) {
-        const uid = msg.uid;
-        const id = `imap-${settings.email}-${uid}`;
-        if (existingIds.has(id)) continue;
-
-        const env = msg.envelope;
-        const from = parseAddress(env?.from);
-        const to = parseAddress(env?.to);
-        const subject =
-          (typeof env?.subject === "string"
-            ? env.subject
-            : Array.isArray(env?.subject)
-              ? (env.subject as string[]).join(" ")
-              : undefined) ?? "(无主题)";
-        let body = "";
-        let htmlBody: string | undefined;
-        let attachments: ParsedAttachment[] = [];
-        try {
-          const raw = typeof msg.source === "string" ? Buffer.from(msg.source, "utf-8") : msg.source;
-          if (raw && raw.length > 0) {
-            const parsed = await simpleParser(raw);
-            const text = parsed.text?.trim();
-            const html = parsed.html;
-            if (text) {
-              body = text.slice(0, 5000);
-            } else if (html) {
-              body = htmlToPlainText(html, 5000);
+          const env = msg.envelope;
+          const from = parseAddress(env?.from);
+          const to = parseAddress(env?.to);
+          const subject =
+            (typeof env?.subject === "string"
+              ? env.subject
+              : Array.isArray(env?.subject)
+                ? (env.subject as string[]).join(" ")
+                : undefined) ?? "(无主题)";
+          let body = "";
+          let htmlBody: string | undefined;
+          let attachments: ParsedAttachment[] = [];
+          try {
+            const raw = typeof msg.source === "string" ? Buffer.from(msg.source, "utf-8") : msg.source;
+            if (raw && raw.length > 0) {
+              const parsed = await simpleParser(raw);
+              const rawText = parsed.text?.trim();
+              const rawHtml = parsed.html;
+              const text = rawText ? stripLeadingHeaders(rawText) : "";
+              const html = rawHtml && typeof rawHtml === "string" ? stripLeadingHeaders(rawHtml) : undefined;
+              if (text) {
+                body = text.slice(0, 5000);
+              } else if (html) {
+                body = htmlToPlainText(html, 5000);
+              }
+              if (!body) body = "(无正文)";
+              if (html) {
+                htmlBody = html.length > 200_000 ? html.slice(0, 200_000) + "..." : html;
+              }
+              if (Array.isArray(parsed.attachments) && parsed.attachments.length > 0) {
+                attachments = parsed.attachments;
+              }
+            } else {
+              body = "(无法解析正文)";
             }
-            if (!body) body = "(无正文)";
-            if (html && typeof html === "string") {
-              htmlBody = html.length > 200_000 ? html.slice(0, 200_000) + "..." : html;
-            }
-            if (Array.isArray(parsed.attachments) && parsed.attachments.length > 0) {
-              attachments = parsed.attachments;
-            }
-          } else {
+          } catch {
             body = "(无法解析正文)";
           }
-        } catch {
-          body = "(无法解析正文)";
-        }
-        const snippet = body.slice(0, 80).replace(/\s+/g, " ");
-        const date = env?.date ? formatDate(new Date(env.date)) : formatDate(new Date());
+          const snippet = body.slice(0, 80).replace(/\s+/g, " ");
+          const date = env?.date ? formatDate(new Date(env.date)) : formatDate(new Date());
 
-        newMails.push({
-          id,
-          from: from.name || from.email || "未知",
-          fromEmail: from.email,
-          to: to.email ? to.email : settings.email,
-          subject,
-          snippet,
-          body,
-          htmlBody: htmlBody ?? undefined,
-          date,
-          read: false,
-          starred: false,
-          folder: "inbox",
-        });
-        if (attachments.length > 0) {
-          pendingAttachments.set(id, attachments);
+          newMails.push({
+            id,
+            from: from.name || from.email || "未知",
+            fromEmail: from.email,
+            to: to.email ? to.email : settings.email,
+            subject,
+            snippet,
+            body,
+            htmlBody: htmlBody ?? undefined,
+            date,
+            read: false,
+            starred: false,
+            folder,
+          });
+          if (attachments.length > 0) {
+            pendingAttachments.set(id, attachments);
+          }
+          existingIds.add(id);
         }
-        existingIds.add(id);
+      } finally {
+        lock.release();
       }
-    } finally {
-      lock.release();
+    };
+
+    await syncMailbox("INBOX", "inbox");
+
+    const list = await client.list();
+    const spamPath = list?.find((m) => m.path && isSpamMailbox(m.path))?.path;
+    if (spamPath) {
+      await syncMailbox(spamPath, "spam");
     }
+
     await client.logout();
   } catch (err) {
     const message = err instanceof Error ? err.message : "IMAP 连接失败";
